@@ -101,6 +101,8 @@ class BuildModule(object):
         self._set_params_func = self.mod["set_params"]
         self._get_params_func = self.mod["get_params"]
         self._get_function_metadata = self.mod["get_function_metadata"]
+        self._get_devices = self.mod["get_devices"]
+        self._get_irmodule = self.mod["get_irmodule"]
 
     def build(
         self, mod, target=None, target_host=None, params=None, executor="graph", mod_name=None
@@ -123,7 +125,7 @@ class BuildModule(object):
             to setup the dimensions and parameters correctly.
             target_host is used to specify the host side codegen target.
             By default, llvm is used if it is enabled,
-            otherwise a stackvm intepreter is used.
+            otherwise a stackvm interpreter is used.
 
         params : dict of str to NDArray
             Input parameters to the graph that do not change
@@ -148,6 +150,11 @@ class BuildModule(object):
         params : dict
             The parameters of the final graph.
         """
+        if target_host is not None:
+            warnings.warn(
+                "target_host parameter is going to be deprecated. "
+                "Please pass in tvm.target.Target(target, host=target_host) instead."
+            )
         target = build_target_by_device_type_map(target)
         target, target_host = Target.check_and_update_host_consist(
             target, target_host, target_is_dict_key=False
@@ -231,6 +238,10 @@ class BuildModule(object):
         each PrimFunc"""
         return self._get_function_metadata()
 
+    def get_devices(self):
+        """Returns a list of devices configured in this module"""
+        return self._get_devices()
+
     def get_params(self):
         """Return the updated weights."""
         params = self._get_params_func()
@@ -238,6 +249,10 @@ class BuildModule(object):
         for key, value in params.items():
             ret[key] = value.data
         return ret
+
+    def get_irmodule(self):
+        """Returns the Target IRModule's post-lowering"""
+        return self._get_irmodule()
 
 
 @register_func("tvm.relay.module_export_library")
@@ -303,7 +318,7 @@ def build(ir_mod, target=None, target_host=None, params=None, mod_name="default"
         setup the dimensions and parameters correctly.
         target_host is used to specify the host side codegen target.
         By default, llvm is used if it is enabled,
-        otherwise a stackvm intepreter is used.
+        otherwise a stackvm interpreter is used.
 
     params : dict of str to NDArray
         Input parameters to the graph that do not change
@@ -332,15 +347,22 @@ def build(ir_mod, target=None, target_host=None, params=None, mod_name="default"
             "instead of deprecated parameter mod (tvm.relay.function.Function)",
             DeprecationWarning,
         )
+
+    if target_host is not None:
+        warnings.warn(
+            "target_host parameter is going to be deprecated. "
+            "Please pass in tvm.target.Target(target, host=target_host) instead."
+        )
+
+    target, target_host = Target.check_and_update_host_consist(
+        target, target_host, target_is_dict_key=False
+    )
+
     target = build_target_by_device_type_map(target)
     if isinstance(target_host, (str, Target)):
         target_host = Target(target_host)
     elif target_host:
         raise ValueError("target host must be the type of str, " + "tvm.target.Target, or None")
-
-    target, target_host = Target.check_and_update_host_consist(
-        target, target_host, target_is_dict_key=False
-    )
 
     # Retrieve the executor from the target
     executor = get_executor_from_target(target, target_host)
@@ -358,14 +380,29 @@ def build(ir_mod, target=None, target_host=None, params=None, mod_name="default"
             mod=ir_mod, target=target, params=params, executor=executor, mod_name=mod_name
         )
         func_metadata = bld_mod.get_function_metadata()
+        devices = bld_mod.get_devices()
+        lowered_ir_mods = bld_mod.get_irmodule()
 
         if executor == "aot":
             executor_factory = _executor_factory.AOTExecutorFactoryModule(
-                ir_mod, target, runtime_mod, mod_name, params, func_metadata
+                ir_mod,
+                lowered_ir_mods,
+                target,
+                runtime_mod,
+                mod_name,
+                params,
+                func_metadata,
+                devices,
             )
         elif executor == "graph":
             executor_factory = _executor_factory.GraphExecutorFactoryModule(
-                ir_mod, target, executor_config, runtime_mod, mod_name, params, func_metadata
+                ir_mod,
+                target,
+                executor_config,
+                runtime_mod,
+                mod_name,
+                params,
+                func_metadata,
             )
         else:
             assert False, "Executor " + executor + " not supported"
@@ -452,7 +489,7 @@ def bind_params_by_name(func, params):
 class GraphExecutor(_interpreter.Executor):
     """Wrapper around Executor interface.
 
-    This executor is used for debug and testing purpoes.
+    This executor is used for debug and testing purposes.
 
     Parameters
     ----------

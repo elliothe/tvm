@@ -220,9 +220,7 @@ void ConcreteScheduleNode::Seed(support::LinearCongruentialEngine::TRandState se
 }
 
 support::LinearCongruentialEngine::TRandState ConcreteScheduleNode::ForkSeed() {
-  // In order for reproducibility, we computer the new seed using RNG's random state and a different
-  // set of parameters. Note that both 32767 and 1999999973 are prime numbers.
-  return (support::LinearCongruentialEngine(&rand_state_)() * 32767) % 1999999973;
+  return support::LinearCongruentialEngine(&rand_state_).ForkSeed();
 }
 
 ExprRV ConcreteScheduleNode::SampleCategorical(const Array<Integer>& candidates,
@@ -231,6 +229,16 @@ ExprRV ConcreteScheduleNode::SampleCategorical(const Array<Integer>& candidates,
   TVM_TIR_SCHEDULE_BEGIN();
   return CreateRV(tir::SampleCategorical(&this->rand_state_, candidates, probs, &decision));
   TVM_TIR_SCHEDULE_END("sample-categorical", this->error_render_level_);
+  throw;
+}
+
+Array<ExprRV> ConcreteScheduleNode::SamplePerfectTile(const LoopRV& loop_rv, int n,
+                                                      int max_innermost_factor,
+                                                      Optional<Array<Integer>> decision) {
+  TVM_TIR_SCHEDULE_BEGIN();
+  return CreateRV(tir::SamplePerfectTile(&this->rand_state_, this->GetSRef(loop_rv), n,
+                                         max_innermost_factor, &decision));
+  TVM_TIR_SCHEDULE_END("sample-perfect-tile", this->error_render_level_);
   throw;
 }
 
@@ -282,6 +290,38 @@ BlockRV ConcreteScheduleNode::GetBlock(const String& name, const String& func_na
 
 Array<LoopRV> ConcreteScheduleNode::GetLoops(const BlockRV& block_rv) {
   return CreateRV<LoopRV>(tir::GetLoops(this->GetSRef(block_rv)));
+}
+
+Array<BlockRV> ConcreteScheduleNode::GetChildBlocks(const BlockRV& block_rv) {
+  Array<BlockRV> result;
+  TVM_TIR_SCHEDULE_BEGIN();
+  result = CreateRV<BlockRV>(tir::GetChildBlocks(state_, this->GetSRef(block_rv)));
+  TVM_TIR_SCHEDULE_END("get-child-blocks", this->error_render_level_);
+  this->state_->DebugVerify();
+  return result;
+}
+
+Array<BlockRV> ConcreteScheduleNode::GetChildBlocks(const LoopRV& loop_rv) {
+  Array<BlockRV> result;
+  TVM_TIR_SCHEDULE_BEGIN();
+  result = CreateRV<BlockRV>(tir::GetChildBlocks(state_, this->GetSRef(loop_rv)));
+  TVM_TIR_SCHEDULE_END("get-child-blocks", this->error_render_level_);
+  this->state_->DebugVerify();
+  return result;
+}
+
+Array<BlockRV> ConcreteScheduleNode::GetProducers(const BlockRV& block_rv) {
+  TVM_TIR_SCHEDULE_BEGIN();
+  return CreateRV<BlockRV>(tir::GetProducers(state_, this->GetSRef(block_rv)));
+  TVM_TIR_SCHEDULE_END("get-producers", this->error_render_level_);
+  throw;
+}
+
+Array<BlockRV> ConcreteScheduleNode::GetConsumers(const BlockRV& block_rv) {
+  TVM_TIR_SCHEDULE_BEGIN();
+  return CreateRV<BlockRV>(tir::GetConsumers(state_, this->GetSRef(block_rv)));
+  TVM_TIR_SCHEDULE_END("get-consumers", this->error_render_level_);
+  throw;
 }
 
 /******** Schedule: Transform loops ********/
@@ -502,6 +542,15 @@ void ConcreteScheduleNode::StorageAlign(const BlockRV& block_rv, int buffer_inde
 }
 
 /******** Schedule: Reduction ********/
+
+BlockRV ConcreteScheduleNode::DecomposeReduction(const BlockRV& block_rv, const LoopRV& loop_rv) {
+  StmtSRef result{nullptr};
+  TVM_TIR_SCHEDULE_BEGIN();
+  result = tir::DecomposeReduction(state_, this->GetSRef(block_rv), this->GetSRef(loop_rv));
+  TVM_TIR_SCHEDULE_END("decompose-reduction", this->error_render_level_);
+  this->state_->DebugVerify();
+  return CreateRV<BlockRV>(result);
+}
 
 BlockRV ConcreteScheduleNode::RFactor(const LoopRV& loop_rv, int factor_axis) {
   StmtSRef result{nullptr};

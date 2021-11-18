@@ -894,6 +894,7 @@ def test_slice(target, dev):
     _test_slice_iteration_v10(x, x[:, :, 3:4], starts=(0, 0, 3), ends=(20, 10, 4))
     _test_slice_iteration_v10(x, x[:, 1:1000], starts=(1,), ends=(1000,), axes=(1,))
     _test_slice_iteration_v10(x, x[:, 0:-1], starts=(0,), ends=(-1,), axes=(1,))
+    _test_slice_iteration_v10(x, x[:, 0:-1], starts=(0,), ends=(-1,), axes=(-1,))
     _test_slice_iteration_v10(
         x,
         x[0:3, 0:10],
@@ -1966,6 +1967,9 @@ def test_split(target, dev):
     verify_split([1, 2, 3], [[1], [2], [3]], False, 0, False)
     # Split a single value to a single value
     verify_split([1], [[1]], [1], pass_split=True)
+    # Test that the default case modifies nothing when split list has length one
+    verify_split([[1.0, 2.0]], [[1.0, 2.0]], [2], 1)
+    verify_split([[1.0, 2.0]], [[1.0, 2.0]], [1], 0)
 
 
 @tvm.testing.parametrize_targets
@@ -3470,6 +3474,49 @@ def test_lppool(target, dev):
     )
 
 
+def verify_global_lppool(x_shape, p, out_shape, target, dev):
+    pool_node = helper.make_node(
+        "GlobalLpPool",
+        inputs=["x"],
+        outputs=["y"],
+        p=p,
+    )
+
+    graph = helper.make_graph(
+        [pool_node],
+        "global_lppool_test",
+        inputs=[helper.make_tensor_value_info("x", TensorProto.FLOAT, list(x_shape))],
+        outputs=[helper.make_tensor_value_info("y", TensorProto.FLOAT, list(out_shape))],
+    )
+
+    model = helper.make_model(graph, producer_name="global_lppool_test")
+    verify_with_ort(
+        model, [x_shape], out_shape, use_vm=True, convert_to_static=True, target=target, dev=dev
+    )
+
+
+@tvm.testing.parametrize_targets
+def test_global_lppool(target, dev):
+
+    # LpPool1D
+    verify_global_lppool(x_shape=[1, 15, 16], p=2, out_shape=[1, 15, 1], target=target, dev=dev)
+
+    # LpPool2D
+    verify_global_lppool(
+        x_shape=[1, 15, 32, 32], p=2, out_shape=[1, 15, 1, 1], target=target, dev=dev
+    )
+
+    # LpPool2D
+    verify_global_lppool(
+        x_shape=[1, 15, 32, 32], p=3, out_shape=[1, 15, 1, 1], target=target, dev=dev
+    )
+
+    # LpPool3D
+    verify_global_lppool(
+        x_shape=[1, 15, 3, 32, 32], p=2, out_shape=[1, 15, 1, 1, 1], target=target, dev=dev
+    )
+
+
 def verify_rnn(
     seq_length,
     batch_size,
@@ -3927,6 +3974,7 @@ def test_resize(target, dev):
             make_constant_node("scales", onnx.TensorProto.FLOAT, (len(scales),), scales),
         ]
         input_names = ["X", "roi", "scales"]
+
         if oshape != []:
             nodes.append(
                 make_constant_node("sizes", onnx.TensorProto.INT64, (len(oshape),), oshape)
@@ -4871,10 +4919,6 @@ unsupported_onnx_tests = [
     "test_cast_FLOAT_to_BFLOAT16",
     "test_cast_FLOAT_to_STRING",
     "test_cast_STRING_to_FLOAT",
-    "test_compress_0",
-    "test_compress_1",
-    "test_compress_default_axis",
-    "test_compress_negative_axis",
     "test_convtranspose_dilations",
     "test_convtranspose_output_shape",
     "test_cumsum_1d",
@@ -4891,13 +4935,6 @@ unsupported_onnx_tests = [
     "test_dropout_default_mask_ratio",
     "test_dropout_default_ratio",
     "test_if_seq",
-    "test_logsoftmax_axis_0_expanded",
-    "test_logsoftmax_axis_1_expanded",
-    "test_logsoftmax_axis_2_expanded",
-    "test_logsoftmax_default_axis_expanded",
-    "test_logsoftmax_example_1_expanded",
-    "test_logsoftmax_large_number_expanded",
-    "test_logsoftmax_negative_axis_expanded",
     "test_loop11",
     "test_loop13_seq",
     "test_matmulinteger",
@@ -4907,26 +4944,8 @@ unsupported_onnx_tests = [
     "test_maxpool_with_argmax_2d_precomputed_strides",
     "test_maxunpool_export_with_output_shape",
     "test_mvn",
-    # When unsqueeze is fully supported, remaining nllloss tests should work:
-    "test_nllloss_NC_expanded",
-    "test_nllloss_NCd1_expanded",
-    "test_nllloss_NCd1_ii_expanded",
-    "test_nllloss_NCd1_mean_weight_negative_ii_expanded",
-    "test_nllloss_NCd1_weight_expanded",
-    "test_nllloss_NCd1_weight_ii_expanded",
-    "test_nllloss_NCd1d2_expanded",
-    "test_nllloss_NCd1d2_no_weight_reduction_mean_ii_expanded",
-    "test_nllloss_NCd1d2_reduction_mean_expanded",
-    "test_nllloss_NCd1d2_reduction_sum_expanded",
-    "test_nllloss_NCd1d2_with_weight_expanded",
-    "test_nllloss_NCd1d2_with_weight_reduction_mean_expanded",
-    "test_nllloss_NCd1d2_with_weight_reduction_sum_expanded",
-    "test_nllloss_NCd1d2_with_weight_reduction_sum_ii_expanded",
+    # This test fails llvm with a lowering error:
     "test_nllloss_NCd1d2d3_none_no_weight_negative_ii_expanded",
-    "test_nllloss_NCd1d2d3_sum_weight_high_ii_expanded",
-    "test_nllloss_NCd1d2d3d4d5_mean_weight_expanded",
-    "test_nllloss_NCd1d2d3d4d5_none_no_weight_expanded",
-    "test_qlinearmatmul_2D",
     "test_qlinearmatmul_3D",
     "test_range_float_type_positive_delta_expanded",
     "test_range_int32_type_negative_delta_expanded",
@@ -4940,71 +4959,18 @@ unsupported_onnx_tests = [
     "test_reduce_sum_keepdims_random",
     "test_reduce_sum_negative_axes_keepdims_example",
     "test_reduce_sum_negative_axes_keepdims_random",
-    "test_resize_downsample_sizes_cubic",
-    "test_resize_downsample_sizes_linear_pytorch_half_pixel",
-    "test_resize_downsample_sizes_nearest",
-    "test_resize_tf_crop_and_resize",
-    "test_resize_upsample_sizes_cubic",
-    "test_resize_upsample_sizes_nearest",
-    "test_resize_upsample_sizes_nearest_ceil_half_pixel",
-    "test_resize_upsample_sizes_nearest_floor_align_corners",
-    "test_resize_upsample_sizes_nearest_round_prefer_ceil_asymmetric",
     "test_rnn_seq_length",
     "test_round",
     "test_scan9_sum",
     "test_scan_sum",
-    # With reduce_sum supported fully, these expanded tests should pass
-    "test_sce_NCd1_mean_weight_negative_ii_expanded",
-    "test_sce_NCd1_mean_weight_negative_ii_log_prob_expanded",
-    "test_sce_NCd1d2d3_none_no_weight_negative_ii_expanded",
-    "test_sce_NCd1d2d3_none_no_weight_negative_ii_log_prob_expanded",
-    "test_sce_NCd1d2d3_sum_weight_high_ii_expanded",
-    "test_sce_NCd1d2d3_sum_weight_high_ii_log_prob_expanded",
-    "test_sce_NCd1d2d3d4d5_mean_weight_expanded",
-    "test_sce_NCd1d2d3d4d5_mean_weight_log_prob_expanded",
-    "test_sce_NCd1d2d3d4d5_none_no_weight_expanded",
-    "test_sce_NCd1d2d3d4d5_none_no_weight_log_prob_expanded",
-    "test_sce_mean_3d_expanded",
-    "test_sce_mean_3d_log_prob_expanded",
-    "test_sce_mean_expanded",
-    "test_sce_mean_log_prob_expanded",
-    "test_sce_mean_no_weight_ii_3d_expanded",
-    "test_sce_mean_no_weight_ii_3d_log_prob_expanded",
-    "test_sce_mean_no_weight_ii_4d_expanded",
-    "test_sce_mean_no_weight_ii_4d_log_prob_expanded",
-    "test_sce_mean_no_weight_ii_expanded",
-    "test_sce_mean_no_weight_ii_log_prob_expanded",
-    "test_sce_mean_weight_expanded",
-    "test_sce_mean_weight_ii_3d_expanded",
-    "test_sce_mean_weight_ii_3d_log_prob_expanded",
-    "test_sce_mean_weight_ii_4d_expanded",
-    "test_sce_mean_weight_ii_4d_log_prob_expanded",
-    "test_sce_mean_weight_ii_expanded",
-    "test_sce_mean_weight_ii_log_prob_expanded",
-    "test_sce_mean_weight_log_prob_expanded",
-    "test_sce_none_expanded",
-    "test_sce_none_log_prob_expanded",
-    "test_sce_none_weights_expanded",
-    "test_sce_none_weights_log_prob_expanded",
-    "test_sce_sum_expanded",
-    "test_sce_sum_log_prob_expanded",
     "test_sequence_insert_at_back",
     "test_sequence_insert_at_front",
     "test_simple_rnn_defaults",
     "test_simple_rnn_with_initial_bias",
-    "test_softmax_axis_0_expanded",
-    "test_softmax_axis_1_expanded",
-    "test_softmax_axis_2_expanded",
-    "test_softmax_default_axis_expanded",
-    "test_softmax_example_expanded",
-    "test_softmax_large_number_expanded",
-    "test_softmax_negative_axis_expanded",
     "test_split_variable_parts_1d",
     "test_split_variable_parts_2d",
     "test_split_variable_parts_default_axis",
     "test_split_zero_size_splits",
-    "test_squeeze",
-    "test_squeeze_negative_axes",
     "test_strnormalizer_export_monday_casesensintive_lower",
     "test_strnormalizer_export_monday_casesensintive_nochangecase",
     "test_strnormalizer_export_monday_casesensintive_upper",
@@ -5024,16 +4990,13 @@ unsupported_onnx_tests = [
     "test_training_dropout_mask",
     "test_training_dropout_zero_ratio",
     "test_training_dropout_zero_ratio_mask",
-    "test_unique_sorted_with_axis",
-    "test_unique_sorted_with_axis_3d",
-    "test_unique_sorted_with_negative_axis",
-    "test_unsqueeze_axis_0",
-    "test_unsqueeze_axis_1",
-    "test_unsqueeze_axis_2",
-    "test_unsqueeze_negative_axes",
+    # These unsqueeze tests work, but take 2+ hrs to run
     "test_unsqueeze_three_axes",
     "test_unsqueeze_two_axes",
     "test_unsqueeze_unsorted_axes",
+    "test_unique_sorted_with_axis",
+    "test_unique_sorted_with_axis_3d",
+    "test_unique_sorted_with_negative_axis",
     "test_upsample_nearest",
 ]
 
@@ -5558,6 +5521,27 @@ def test_qlinearmul(target, dev):
 
 
 @tvm.testing.parametrize_targets
+def test_qlinearleakyrelu(target, dev):
+    def verify_qlinearleakyrelu(inshape, kwargs):
+
+        in_array = np.random.random(inshape).astype("float32")
+        node = helper.make_node("LeakyRelu", ["X"], ["Y"], **kwargs)
+
+        graph = helper.make_graph(
+            [node],
+            "qlinearRelu_test",
+            inputs=[helper.make_tensor_value_info("X", TensorProto.FLOAT, list(in_array.shape))],
+            outputs=[helper.make_tensor_value_info("Y", TensorProto.FLOAT, list(in_array.shape))],
+        )
+        model = helper.make_model(graph, producer_name="qlinearRelu_test")
+        quantize_and_verify_with_ort(model, ["X"], [in_array.shape], target, dev)
+
+    verify_qlinearleakyrelu([2, 4, 5, 6], {"alpha": 0.25})
+    verify_qlinearleakyrelu([6, 5, 6, 7], {"alpha": 0.35})
+    verify_qlinearleakyrelu([5, 1, 4, 6], {"alpha": 0.65})
+
+
+@tvm.testing.parametrize_targets
 def test_qlinearsigmoid(target, dev):
     def verify_qlinearsigmoid(a_shape):
 
@@ -5882,3 +5866,4 @@ if __name__ == "__main__":
     test_random_uniform()
     test_convinteger()
     test_batch_matmul()
+    test_global_lppool()

@@ -194,6 +194,16 @@ class ScheduleNode : public runtime::Object {
    */
   virtual ExprRV SampleCategorical(const Array<Integer>& candidates, const Array<FloatImm>& probs,
                                    Optional<Integer> decision = NullOpt) = 0;
+  /*!
+   * \brief Sample the factors to perfect tile a specific loop
+   * \param loop_rv The loop to be tiled
+   * \param n The number of tiles to be sampled
+   * \param max_innermost_factor The maximum tile size allowed to be sampled in the innermost loop
+   * \param decision The sampling decision
+   * \return A list of length `n`, the random perfect tile sizes sampled
+   */
+  virtual Array<ExprRV> SamplePerfectTile(const LoopRV& loop_rv, int n, int max_innermost_factor,
+                                          Optional<Array<Integer>> decision = NullOpt) = 0;
 
   /******** Schedule: Get blocks & loops ********/
   /*!
@@ -210,12 +220,37 @@ class ScheduleNode : public runtime::Object {
    * \return A list of loops above the given block in its scope, from outer to inner
    */
   virtual Array<LoopRV> GetLoops(const BlockRV& block_rv) = 0;
+  /*!
+   * \brief Get the leaf blocks of a specific scope
+   * \param block_rv The block where the scope is rooted
+   * \return A list of child blocks
+   */
+  virtual Array<BlockRV> GetChildBlocks(const BlockRV& block_rv) = 0;
+  /*!
+   * \brief Get the leaf blocks of under a specific loop
+   * \param loop_rv The loop under which collecting is conducted
+   * \return A list of child blocks
+   */
+  virtual Array<BlockRV> GetChildBlocks(const LoopRV& loop_rv) = 0;
+  /*!
+   * \brief Get the producer of a specific block
+   * \param block_rv The block in the query
+   * \return A list of blocks, the producers of the given block
+   */
+  virtual Array<BlockRV> GetProducers(const BlockRV& block_rv) = 0;
+  /*!
+   * \brief Get the consumers of a specific block
+   * \param block_rv The block to be queried
+   * \return A list of blocks, the consumers of the given block
+   */
+  virtual Array<BlockRV> GetConsumers(const BlockRV& block_rv) = 0;
   /******** Schedule: Transform loops ********/
   /*!
    * \brief Fuse a list of consecutive loops into one. It requires:
    * 1) The loops can't have annotations or thread bindings.
    * 2) The (i+1)-th loop must be the only child of the i-th loop.
    * 3) All loops must start with 0.
+   * 4) The domain of a loop to be fused cannot depend on another loop to be fused.
    * \param loop_rvs The loops to be fused
    * \return The new loop after fusion
    */
@@ -364,6 +399,22 @@ class ScheduleNode : public runtime::Object {
    */
   virtual void ReverseComputeInline(const BlockRV& block) = 0;
   /******** Schedule: Reduction ********/
+  /*!
+   * \brief Decompose a reduction block into two separate blocks.
+   * a) The init block, which is translated from the init statement of the reduction block;
+   * b) The update block, which is the original block without init statement.
+   *
+   * The init block is inserted right before the given loop.
+   *
+   * The schedule primitive requires:
+   * 1) The input block is a reduction block.
+   * 2) The input loop is the ancestor of the block.
+   * 3) The input loop is not lower than all the loops related to reduce block var.
+   * \param block_rv The reduction block to be decomposed
+   * \param loop_rv The loop above which the init block is inserted before.
+   * \return The init block
+   */
+  virtual BlockRV DecomposeReduction(const BlockRV& block_rv, const LoopRV& loop_rv) = 0;
   /*!
    * \brief Factorize an associative reduction block by the specified loop.
    * \details An associative reduction cannot be parallelized directly,

@@ -290,9 +290,9 @@ class BaseInliner : public StmtExprMutator {
 
   /*!
    * \brief Update the following block signature:
-   * 1) tir.alloc_buffer, if the block is scope root
-   * 2) tir.reads, if the block is not scope root
-   * 3) tir.writes, if the block is not scope root
+   * 1) T.alloc_buffer, if the block is scope root
+   * 2) T.reads, if the block is not scope root
+   * 3) T.writes, if the block is not scope root
    * \param block The block to be updated
    * \param is_scope_root A flag indicating if a block is the scope root of the block to be inlined
    * \return The updated block
@@ -313,7 +313,11 @@ class BaseInliner : public StmtExprMutator {
     // Step 2. Update `BlockNode::reads` and `BlockNode::writes`
     Array<BufferRegion> reads = std::move(block->reads);
     Array<BufferRegion> writes = std::move(block->writes);
-    if (!is_scope_root) {
+    auto f_access_inline_buffer = [this](const BufferRegion& access) {
+      return access->buffer.same_as(this->inlined_buffer_);
+    };
+    if (!is_scope_root && (std::any_of(reads.begin(), reads.end(), f_access_inline_buffer) ||
+                           std::any_of(writes.begin(), writes.end(), f_access_inline_buffer))) {
       Array<Array<BufferRegion>> inspected = GetBlockReadWriteRegion(block, buffer_var_map_);
       reads = std::move(inspected[0]);
       writes = std::move(inspected[1]);

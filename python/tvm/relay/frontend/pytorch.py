@@ -19,6 +19,7 @@
 # pylint: disable=import-outside-toplevel, simplifiable-if-expression, cell-var-from-loop, unnecessary-lambda
 # pylint: disable=missing-function-docstring
 """PT: PyTorch frontend."""
+import functools
 import itertools
 import logging
 import math
@@ -39,11 +40,11 @@ from ..loops import while_loop
 from ..prelude import Prelude, StaticTensorArrayOps
 from ..ty import Any, TensorType, TupleType
 from . import qnn_torch
-from .common import AttrCvt, get_relay_op, unbind, lstm_cell, gru_cell
-from .common import infer_value as _infer_value
+from .common import AttrCvt, get_relay_op, gru_cell
 from .common import infer_shape as _infer_shape
+from .common import infer_value as _infer_value
 from .common import infer_value_simulated as _infer_value_simulated
-from .common import try_infer_value
+from .common import lstm_cell, try_infer_value, unbind
 from .pytorch_utils import is_version_greater_than
 
 __all__ = ["from_pytorch"]
@@ -848,35 +849,23 @@ class PyTorchOpConverter:
         data = inputs[0]
         return data * self.hard_sigmoid(inputs, input_types)
 
-    def adaptive_avg_pool_2d(self, inputs, input_types):
+    def adaptive_avg_pool(self, op, inputs, input_types):
         data = inputs[0]
         output_size = inputs[1]
 
         def func(x):
-            return _op.nn.adaptive_avg_pool2d(x, output_size=output_size)
+            return op(x, output_size=output_size)
 
         if self.is_quantized_tensor(data):
             return qnn_torch.apply_with_upcast(data, func)
 
         return func(data)
 
-    def adaptive_max_pool_2d(self, inputs, input_types):
-        data = inputs[0]
-        output_size = inputs[1]
-
-        # returns dummy indices too
-        return _op.nn.adaptive_max_pool2d(data, output_size=output_size), None
-
-    def adaptive_max_pool_3d(self, inputs, input_types):
+    def adaptive_max_pool(self, op, inputs, input_types):
         data = inputs[0]
         output_size = inputs[1]
         # returns dummy indices too
-        return _op.nn.adaptive_max_pool3d(data, output_size=output_size), None
-
-    def adaptive_avg_pool_3d(self, inputs, input_types):
-        data = inputs[0]
-        output_size = inputs[1]
-        return _op.nn.adaptive_avg_pool3d(data, output_size=output_size)
+        return op(data, output_size=output_size), None
 
     @staticmethod
     def convert_const_list(data):
@@ -1021,6 +1010,9 @@ class PyTorchOpConverter:
         elif len(kernel_size) == 2:
             data_layout = "NCHW"
             kernel_layout = "OIHW"
+            if use_transpose:
+                # Transposed convolutions have IOHW layout.
+                kernel_layout = "IOHW"
         else:
             data_layout = "NCW"
             kernel_layout = "OIW"
@@ -1468,7 +1460,7 @@ class PyTorchOpConverter:
         if isinstance(bias, _expr.Expr):
             bias_ndims = len(self.infer_shape_with_prelude(bias))
             if bias_ndims == 1:
-                return _op.nn.bias_add(mm_out, bias)
+                return _op.nn.bias_add(mm_out, bias, axis=-1)
             mm_dtype = self.infer_type_with_prelude(mm_out).dtype
             return self.add([mm_out, bias], [mm_dtype, input_types[2]])
         return mm_out
@@ -1830,7 +1822,7 @@ class PyTorchOpConverter:
 
             def func(x):
                 return _op.image.resize2d(
-                    x, out_size, "NCHW", method, coord_trans, cubic_alpha=-0.75
+                    x, out_size, None, "NCHW", method, coord_trans, cubic_alpha=-0.75
                 )
 
             if self.is_quantized_tensor(data):
@@ -1862,7 +1854,7 @@ class PyTorchOpConverter:
             else:
                 coord_trans = "half_pixel"
 
-            return _op.image.resize3d(data, out_size, "NCDHW", method, coord_trans)
+            return _op.image.resize3d(data, out_size, None, "NCDHW", method, coord_trans)
 
         return upsample3d
 
@@ -2194,7 +2186,9 @@ class PyTorchOpConverter:
         else:
             coord_trans = "half_pixel"
 
-        return _op.image.resize2d(data, out_size, "NCHW", method, coord_trans, cubic_alpha=-0.75)
+        return _op.image.resize2d(
+            data, out_size, None, "NCHW", method, coord_trans, cubic_alpha=-0.75
+        )
 
     def numel(self, inputs, input_types):
         return _op.ndarray_size(inputs[0])
@@ -2763,6 +2757,69 @@ class PyTorchOpConverter:
 
         return (output, _op.stack(hy, 0), _op.stack(cy, 0))
 
+    def all_any_common(self, op, inputs, input_types):
+        dim = inputs[1]
+        keepdim = inputs[2]
+        if self.infer_type(inputs[0]).dtype != "bool":
+            # The input dtype can be uint8.
+            inp = _op.cast(inputs[0], "bool")
+        else:
+            inp = inputs[0]
+        return op(inp, axis=dim, keepdims=keepdim)
+
+    def searchsorted_common(self, sorted_sequence, values, out_int32, right):
+        dtype = "int32" if out_int32 else "int64"
+        values_shape = _infer_shape(values)
+
+        if len(values_shape) == 0:
+            values = _op.expand_dims(values, 0)
+
+        out = _op.searchsorted(sorted_sequence, values, right=right, dtype=dtype)
+
+        if len(values_shape) == 0:
+            return _op.squeeze(out)
+
+        return out
+
+    def searchsorted(self, inputs, input_types):
+        return self.searchsorted_common(*inputs)
+
+    def bucketize(self, inputs, input_types):
+        return self.searchsorted_common(inputs[1], inputs[0], inputs[2], inputs[3])
+
+    def roll(self, inputs, input_types):
+        def slide_axes(inp, shape, ax):
+            axes = list(range(len(shape)))
+            axes = axes[:ax] + [-1] + axes[ax:-1]
+            return _op.transpose(inp, axes)
+
+        x = inputs[0]
+        shifts = inputs[1]
+        dims = inputs[2]
+        shape = self.infer_shape(x)
+        start = _expr.const(0, "int64")
+        step = _expr.const(1, "int64")
+
+        out = x
+        for i, dim in enumerate(dims):
+            roll_dim = _expr.const(shape[dim], "int64")
+            indices_1d = _op.mod(
+                _op.transform.arange(start, roll_dim, step, "int64")
+                - _expr.const(shifts[i], "int64")
+                + roll_dim,
+                roll_dim,
+            )
+            # First fill in the last axis with roll indices, and then do transpose to
+            # bring the roll indices into the desired axis.
+            indices = slide_axes(
+                _op.tile(indices_1d, shape[:dim] + shape[dim + 1 :] + (1,)),
+                shape,
+                dim,
+            )
+            out = _op.gather(out, dim, indices)
+
+        return out
+
     # Operator mappings
     def create_convert_map(self):
         self.convert_map = {
@@ -2820,9 +2877,26 @@ class PyTorchOpConverter:
             "aten::gelu": self.gelu,
             "aten::selu": self.selu,
             "aten::silu": self.silu,
+            "aten::silu_": self.silu,
             "aten::log_sigmoid": self.log_sigmoid,
-            "aten::adaptive_avg_pool2d": self.adaptive_avg_pool_2d,
-            "aten::adaptive_max_pool2d": self.adaptive_max_pool_2d,
+            "aten::adaptive_avg_pool1d": functools.partial(
+                self.adaptive_avg_pool, _op.nn.adaptive_avg_pool1d
+            ),
+            "aten::adaptive_avg_pool2d": functools.partial(
+                self.adaptive_avg_pool, _op.nn.adaptive_avg_pool2d
+            ),
+            "aten::adaptive_avg_pool3d": functools.partial(
+                self.adaptive_avg_pool, _op.nn.adaptive_avg_pool3d
+            ),
+            "aten::adaptive_max_pool1d": functools.partial(
+                self.adaptive_max_pool, _op.nn.adaptive_max_pool1d
+            ),
+            "aten::adaptive_max_pool2d": functools.partial(
+                self.adaptive_max_pool, _op.nn.adaptive_max_pool2d
+            ),
+            "aten::adaptive_max_pool3d": functools.partial(
+                self.adaptive_max_pool, _op.nn.adaptive_max_pool3d
+            ),
             "aten::max_pool2d": self.maxpool_2d,
             "aten::max_pool2d_with_indices": self.maxpool_2d_with_indices,
             "aten::max_pool1d": self.maxpool_1d,
@@ -2908,6 +2982,7 @@ class PyTorchOpConverter:
             "aten::rsqrt": self.make_unary("rsqrt"),
             "aten::ceil": self.make_unary("ceil"),
             "aten::floor": self.make_unary("floor"),
+            "aten::floor_": self.make_unary("floor"),
             "aten::round": self.make_unary("round"),
             "aten::isfinite": self.make_unary("isfinite"),
             "aten::isinf": self.make_unary("isinf"),
@@ -2933,8 +3008,6 @@ class PyTorchOpConverter:
             "aten::bitwise_xor": self.bitwise_xor,
             "aten::Bool": self.Bool,
             "aten::Float": self.Float,
-            "aten::adaptive_avg_pool3d": self.adaptive_avg_pool_3d,
-            "aten::adaptive_max_pool3d": self.adaptive_max_pool_3d,
             "aten::rsub": self.rsub,
             "aten::embedding": self.embedding,
             "aten::one_hot": self.one_hot,
@@ -2986,6 +3059,11 @@ class PyTorchOpConverter:
             "aten::flip": self.flip,
             "aten::gru": self.gru,
             "aten::lstm": self.lstm,
+            "aten::all": functools.partial(self.all_any_common, _op.all),
+            "aten::any": functools.partial(self.all_any_common, _op.any),
+            "aten::searchsorted": self.searchsorted,
+            "aten::bucketize": self.bucketize,
+            "aten::roll": self.roll,
         }
 
     def update_convert_map(self, custom_map):
@@ -3713,6 +3791,7 @@ def from_pytorch(
     custom_convert_map=None,
     default_dtype="float32",
     use_parser_friendly_name=False,
+    keep_quantized_weight=False,
 ):
     """Load PyTorch model in the form of a scripted PyTorch model and convert into relay.
     The companion parameters will be handled automatically.
@@ -3744,6 +3823,16 @@ def from_pytorch(
         The Relay text parser treats a variable name followed by a period as a tuple element access,
         so a variable name like "dense.weight" cannot be parsed correctly.
         Use this option when you want to run the AnnotateSpans pass on the imported module.
+
+    keep_quantized_weight : bool
+        Return quantized weights and bias, rather than float ones. PyTorch stores quantized weights
+        in a custom format, so we cannot directly access 8 bit weights as Numpy arrays. We use
+        a PyTorch function to unpack quantized weights into float32 arrays and quantization
+        parameters. By default, we return float32 weights and rely on the QNN lowering and the
+        Relay constant folding pass to quantize weights at compile time. In BYOC use cases, however,
+        we cannot apply the constant folding pass on a QNN graph. If keep_quantized_weight is True,
+        we quantize weights in the frontend using a function that is equivalent to
+        qnn.op.quantize(...) operating on Numpy arrays.
 
     Returns
     -------
@@ -3789,9 +3878,17 @@ def from_pytorch(
     # For quantized models
     quantized_ops = set(["aten::quantize_per_tensor", "quantized::linear_dynamic"])
     if len(quantized_ops.intersection(set(op_names))) > 0:
-        weight_quant_params = qnn_torch.get_weight_quant_params(script_module)
-        qnn_torch.add_input_quant_params_to_op_inputs(graph)
-        qnn_torch.add_quant_params_to_outputs(outputs, packed_param_map, weight_quant_params)
+        weight_quant_params = qnn_torch.get_weight_quant_params(
+            script_module, packed_param_map.values()
+        )
+        input_scales_for_bias = qnn_torch.add_input_quant_params_to_op_inputs(graph)
+        qnn_torch.add_quant_params_to_outputs(
+            outputs,
+            packed_param_map,
+            weight_quant_params,
+            input_scales_for_bias,
+            keep_quantized_weight,
+        )
         qnn_torch.add_quant_params(tvm_params, weight_quant_params)
         converter.update_convert_map(qnn_torch.convert_map)
 

@@ -23,13 +23,11 @@ Refer to the description inside such functions
 
 from inspect import signature
 from enum import Enum
-from typing import Union, Tuple, Dict, Optional
+from typing import Union, Tuple
 import numpy as np  # type: ignore
 
 import tvm  # type: ignore
 from tvm import relay
-from tvm.relay.build_module import bind_params_by_name  # type: ignore
-from tvm.relay.backend.contrib.ethosu import preprocess  # type: ignore
 
 
 class QConv2DArgs(Enum):
@@ -75,6 +73,21 @@ class ClipArgs(Enum):
 
     A_MIN = 1
     A_MAX = 2
+
+
+class BinaryElementwiseArgs(Enum):
+    """This is a helper enums to access the correct index
+    of binary elementwise arguments
+    """
+
+    ifm = 0
+    ifm2 = 1
+    ifm_scale = 2
+    ifm_zero_point = 3
+    ifm2_scale = 4
+    ifm2_zero_point = 5
+    ofm_scale = 6
+    ofm_zero_point = 7
 
 
 def is_composite_func(func: relay.Function, name: str) -> bool:
@@ -141,43 +154,8 @@ def round_up(a: int, b: int) -> int:
 
 def get_accelerator_config():
     """Get the variant of the accelerator to compile for"""
-    compiler_attrs = tvm.get_global_func("relay.ext.ethosu.get_compiler_attrs")()
+    compiler_attrs = tvm.get_global_func("relay.ext.ethos-u.get_compiler_attrs")()
     return compiler_attrs.accelerator_config
-
-
-# pylint: disable=unused-argument
-def partition_for_ethosu(
-    mod: tvm.ir.IRModule, params: Optional[Dict[str, tvm.runtime.NDArray]] = None, **opts
-):
-    """This helper function partition the relay graph as produced by the
-    relay frontend for a given model into external functions
-    to be presented to the codegen.
-
-    Parameters
-    ----------
-    mod : tvm.ir.IRModule
-        The IRModule that gets generated from a relay frontend
-    params : Optional[Dict[str, tvm.runtime.NDArray]]
-        Constant input parameters.
-
-    Returns
-    -------
-    mod : IRModule
-        The partitioned IRModule with external global functions
-    """
-    if params:
-        mod["main"] = bind_params_by_name(mod["main"], params)
-
-    pattern = relay.op.contrib.get_pattern_table("ethosu")
-    mod = relay.transform.InferType()(mod)
-    mod = relay.transform.MergeComposite(pattern)(mod)
-    mod = relay.transform.AnnotateTarget("ethosu")(mod)
-    mod = relay.transform.MergeCompilerRegions()(mod)
-    mod = relay.transform.InferType()(mod)
-    mod = relay.transform.PartitionGraph()(mod)
-    mod = relay.transform.InferType()(mod)
-    mod = preprocess.preprocess_ext_io()(mod)
-    return mod
 
 
 def get_arg_count(func):
@@ -197,3 +175,15 @@ def get_dim_value(layout: str, dim: int):
         if dim_char == dim:
             return idx
     return None
+
+
+def calculate_size_bytes(expr):
+    """This is a helper function to calculate the number
+    of bytes required to hold the tensor/relay.expr"""
+    try:
+        type_info = np.iinfo(expr.checked_type.dtype)
+    except ValueError:
+        type_info = np.finfo(expr.checked_type.dtype)
+    element_size = type_info.bits // 8
+    elements = np.prod(list(expr.checked_type.shape))
+    return element_size * elements
